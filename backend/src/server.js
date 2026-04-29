@@ -7,6 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const { scanDatabaseStream } = require('./scanners/db-scanner');
+const { pushToNeo4j } = require('./neo4j-pusher');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -29,12 +30,12 @@ setInterval(pruneExpiredJobs, 30_000);
 
 // ── Step 1: register a scan job, get back a jobId ────────────────────────────
 app.post('/api/scan/start', (req, res) => {
-  const { connectionString } = req.body;
+  const { connectionString, spocName } = req.body;
   if (!connectionString || !connectionString.trim()) {
     return res.status(400).json({ error: 'connectionString is required' });
   }
   const jobId = crypto.randomUUID();
-  jobs.set(jobId, { connStr: connectionString.trim(), createdAt: Date.now() });
+  jobs.set(jobId, { connStr: connectionString.trim(), spocName: spocName?.trim() || null, createdAt: Date.now() });
   res.json({ jobId });
 });
 
@@ -64,7 +65,7 @@ app.get('/api/scan/stream/:jobId', (req, res) => {
     res.write(': heartbeat\n\n');
   }, 20_000);
 
-  scanDatabaseStream(job.connStr, (event) => {
+  scanDatabaseStream(job.connStr, job.spocName, (event) => {
     if (closed) return;
     if (event.type === 'building_graph') {
       send('building_graph', { message: 'Building graph…' });
@@ -83,6 +84,21 @@ app.get('/api/scan/stream/:jobId', (req, res) => {
       clearInterval(heartbeat);
       if (!closed) res.end();
     });
+});
+
+// ── Neo4j push ────────────────────────────────────────────────────────────────
+app.post('/api/neo4j/push', async (req, res) => {
+  const { boltUrl, username, password, neo4jGraph, clearFirst } = req.body;
+  if (!boltUrl || !neo4jGraph) {
+    return res.status(400).json({ error: 'boltUrl and neo4jGraph are required' });
+  }
+  try {
+    const result = await pushToNeo4j({ boltUrl, username, password, neo4jGraph, clearFirst });
+    res.json(result);
+  } catch (err) {
+    console.error('Neo4j push error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));

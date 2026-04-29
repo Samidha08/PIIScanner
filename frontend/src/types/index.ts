@@ -47,10 +47,30 @@ export interface ScanSummary {
   piiByCategory: Record<string, { count: number; label: string; color: string }>;
 }
 
+export interface Neo4jNode {
+  id: string;
+  label: string;
+  properties: Record<string, unknown>;
+}
+
+export interface Neo4jRelationship {
+  from: string;
+  to: string;
+  type: string;
+  properties?: Record<string, unknown>;
+}
+
+export interface Neo4jGraph {
+  nodes: Neo4jNode[];
+  relationships: Neo4jRelationship[];
+}
+
 export interface ScanResult {
   nodes: GraphNode[];
   edges: GraphEdge[];
   summary: ScanSummary;
   dbName: string;
   dbType: string;
+  spocName?: string;
+  neo4jGraph?: Neo4jGraph;
 }

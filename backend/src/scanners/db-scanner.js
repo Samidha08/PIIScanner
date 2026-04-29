@@ -25,9 +25,16 @@ function parseConnectionString(connStr) {
   throw new Error('Unsupported database. Supported: MongoDB (mongodb:// or mongodb+srv://), PostgreSQL (postgresql://), MySQL (mysql://), SQLite (file path or sqlite://)');
 }
 
+// ─── SPOC helpers ──────────────────────────────────────────────────────────────
+
+// Returns true if the column list contains a spoc_name-like column
+function hasSpocColumn(cols) {
+  return cols.some(c => /^spoc[_\s]?name$/i.test(String(c.column_name || c.COLUMN_NAME || c.name || '')));
+}
+
 // ─── PostgreSQL ────────────────────────────────────────────────────────────────
 
-async function scanPostgres(connStr, onEvent = () => {}) {
+async function scanPostgres(connStr, onEvent = () => {}, spocName = null) {
   const { Client } = require('pg');
   const client = new Client({ connectionString: connStr, connectionTimeoutMillis: 15000, statement_timeout: 10000 });
   await client.connect();
@@ -73,10 +80,14 @@ async function scanPostgres(connStr, onEvent = () => {}) {
       const cols = columnMap[key] || [];
       const scannedColumns = [];
 
+      const useSpocFilter = spocName && hasSpocColumn(cols);
       for (const col of cols) {
         let sampleValues = [];
         try {
-          const r = await client.query(`SELECT "${col.column_name}" FROM "${schema}"."${tableName}" WHERE "${col.column_name}" IS NOT NULL LIMIT 10`);
+          const spocClause = useSpocFilter ? ` AND spoc_name = $2` : '';
+          const params = useSpocFilter ? [col.column_name, spocName] : [];
+          const q = `SELECT "${col.column_name}" FROM "${schema}"."${tableName}" WHERE "${col.column_name}" IS NOT NULL${spocClause} LIMIT 10`;
+          const r = await client.query(q, params);
           sampleValues = r.rows.map(r => r[col.column_name]);
         } catch (_) {}
         const piiMatches = classifyColumn(col.column_name, sampleValues);
@@ -101,7 +112,7 @@ async function scanPostgres(connStr, onEvent = () => {}) {
 
 // ─── MySQL ─────────────────────────────────────────────────────────────────────
 
-async function scanMySQL(config, onEvent = () => {}) {
+async function scanMySQL(config, onEvent = () => {}, spocName = null) {
   const mysql = require('mysql2/promise');
   const conn = await mysql.createConnection({ ...config, connectTimeout: 15000 });
   try {
@@ -124,11 +135,18 @@ async function scanMySQL(config, onEvent = () => {}) {
 
     for (const table of tables) {
       const tableName = table.TABLE_NAME;
+      const tableCols = columnMap[tableName] || [];
+      const useSpocFilter = spocName && hasSpocColumn(tableCols);
       const scannedColumns = [];
-      for (const col of (columnMap[tableName] || [])) {
+      for (const col of tableCols) {
         let sampleValues = [];
         try {
-          const [rows] = await conn.execute(`SELECT \`${col.COLUMN_NAME}\` FROM \`${tableName}\` WHERE \`${col.COLUMN_NAME}\` IS NOT NULL LIMIT 10`);
+          const spocClause = useSpocFilter ? ' AND `spoc_name` = ?' : '';
+          const params = useSpocFilter ? [spocName] : [];
+          const [rows] = await conn.execute(
+            `SELECT \`${col.COLUMN_NAME}\` FROM \`${tableName}\` WHERE \`${col.COLUMN_NAME}\` IS NOT NULL${spocClause} LIMIT 10`,
+            params
+          );
           sampleValues = rows.map(r => r[col.COLUMN_NAME]);
         } catch (_) {}
         const piiMatches = classifyColumn(col.COLUMN_NAME, sampleValues);
@@ -153,7 +171,7 @@ async function scanMySQL(config, onEvent = () => {}) {
 
 // ─── SQLite ────────────────────────────────────────────────────────────────────
 
-async function scanSQLite(filePath, onEvent = () => {}) {
+async function scanSQLite(filePath, onEvent = () => {}, spocName = null) {
   const Database = require('better-sqlite3');
   const db = new Database(filePath, { readonly: true });
   try {
@@ -171,11 +189,16 @@ async function scanSQLite(filePath, onEvent = () => {}) {
       let rowCount = 0;
       try { rowCount = db.prepare(`SELECT COUNT(*) as cnt FROM "${tableName}"`).get().cnt; } catch (_) {}
 
+      const useSpocFilter = spocName && hasSpocColumn(columns);
       const scannedColumns = [];
       for (const col of columns) {
         let sampleValues = [];
         try {
-          sampleValues = db.prepare(`SELECT "${col.name}" FROM "${tableName}" WHERE "${col.name}" IS NOT NULL LIMIT 10`).all().map(r => r[col.name]);
+          if (useSpocFilter) {
+            sampleValues = db.prepare(`SELECT "${col.name}" FROM "${tableName}" WHERE "${col.name}" IS NOT NULL AND spoc_name = ? LIMIT 10`).all(spocName).map(r => r[col.name]);
+          } else {
+            sampleValues = db.prepare(`SELECT "${col.name}" FROM "${tableName}" WHERE "${col.name}" IS NOT NULL LIMIT 10`).all().map(r => r[col.name]);
+          }
         } catch (_) {}
         const piiMatches = classifyColumn(col.name, sampleValues);
         scannedColumns.push({ name: col.name, dataType: col.type, nullable: col.notnull === 0, piiMatches, hasPii: piiMatches.length > 0 });
@@ -245,23 +268,154 @@ function buildGraphData(scanResult, dbType) {
     }
   }
 
-  return { nodes, edges, summary, dbName: scanResult.dbName, dbType };
+  return { nodes, edges, summary, dbName: scanResult.dbName, dbType, spocName: scanResult.spocName };
+}
+
+// ─── Neo4j graph builder ───────────────────────────────────────────────────────
+
+function parseServerInfo(parsed) {
+  try {
+    if (parsed.type === 'sqlite') return { host: parsed.path, port: null };
+    if (parsed.type === 'mysql') return { host: parsed.config.host, port: parsed.config.port || 3306 };
+    // mongodb / postgres — extract first host from connection string
+    const match = (parsed.connStr || '').match(/@([^/?]+)/);
+    if (match) {
+      const first = match[1].split(',')[0];
+      const [host, port] = first.split(':');
+      return { host: host || 'unknown', port: port ? parseInt(port) : null };
+    }
+  } catch (_) {}
+  return { host: 'unknown', port: null };
+}
+
+function buildNeo4jGraph(scanResult, dbType, serverInfo, spocName) {
+  const nodes = [];
+  const rels = [];
+
+  // ── Server node ──────────────────────────────────────────────────────────────
+  const serverId = 'server_1';
+  nodes.push({
+    id: serverId,
+    label: 'Server',
+    properties: { host: serverInfo.host, port: serverInfo.port, dbType },
+  });
+
+  // ── Database node ─────────────────────────────────────────────────────────────
+  const dbId = `db_${scanResult.dbName}`;
+  nodes.push({
+    id: dbId,
+    label: 'Database',
+    properties: { name: scanResult.dbName, dbType },
+  });
+  rels.push({ from: serverId, to: dbId, type: 'HOSTS' });
+
+  // ── User / SPOC node ──────────────────────────────────────────────────────────
+  let userId = null;
+  if (spocName) {
+    userId = `user_${spocName.toLowerCase().replace(/\s+/g, '_')}`;
+    nodes.push({
+      id: userId,
+      label: 'User',
+      properties: { name: spocName },
+    });
+  }
+
+  const piiNodesAdded = new Set();
+
+  for (const [schemaName, schema] of Object.entries(scanResult.schemas)) {
+    const schemaId = `schema_${schemaName}`;
+    nodes.push({
+      id: schemaId,
+      label: 'Schema',
+      properties: { name: schemaName },
+    });
+    rels.push({ from: dbId, to: schemaId, type: 'HAS_SCHEMA' });
+
+    for (const [tableName, table] of Object.entries(schema.tables)) {
+      const fileId = `file_${schemaName}_${tableName}`;
+      nodes.push({
+        id: fileId,
+        label: 'File',
+        properties: {
+          name: tableName,
+          schema: schemaName,
+          rowCount: table.rowCount,
+          columnCount: table.columns.length,
+          piiColumnCount: table.piiColumnCount,
+          hasPii: table.piiColumnCount > 0,
+        },
+      });
+      rels.push({ from: schemaId, to: fileId, type: 'HAS_FILE' });
+
+      // User → File lineage
+      if (userId) {
+        rels.push({ from: userId, to: fileId, type: 'HAS_DATA_IN' });
+      }
+
+      const filePiiTypes = new Set();
+
+      for (const col of table.columns) {
+        const colId = `col_${schemaName}_${tableName}_${col.name}`;
+        nodes.push({
+          id: colId,
+          label: 'Column',
+          properties: {
+            name: col.name,
+            dataType: col.dataType || 'unknown',
+            nullable: col.nullable,
+            hasPii: col.hasPii,
+          },
+        });
+        rels.push({ from: fileId, to: colId, type: 'HAS_COLUMN' });
+
+        for (const match of col.piiMatches) {
+          const piiId = `piitype_${match.category}`;
+
+          if (!piiNodesAdded.has(piiId)) {
+            piiNodesAdded.add(piiId);
+            nodes.push({
+              id: piiId,
+              label: 'PIIType',
+              properties: {
+                category: match.category,
+                name: match.categoryInfo.label,
+                description: match.categoryInfo.description,
+                dpdpaSection: match.categoryInfo.dpdpa_section,
+                sensitive: /sensitive|biometric|financial|health|government/i.test(match.categoryInfo.dpdpa_section),
+              },
+            });
+          }
+
+          rels.push({ from: colId, to: piiId, type: 'CLASSIFIED_AS', properties: { confidence: match.confidence, matchedBy: match.matchedBy } });
+          filePiiTypes.add(piiId);
+        }
+      }
+
+      // File -[CONTAINS]-> PIIType  (direct data-lineage edge, as requested)
+      for (const piiId of filePiiTypes) {
+        rels.push({ from: fileId, to: piiId, type: 'CONTAINS' });
+      }
+    }
+  }
+
+  return { nodes, relationships: rels };
 }
 
 // ─── Public API ────────────────────────────────────────────────────────────────
 
-async function scanDatabaseStream(connectionString, onEvent) {
+async function scanDatabaseStream(connectionString, spocName, onEvent) {
   const parsed = parseConnectionString(connectionString);
   onEvent({ type: 'status', message: 'Connecting…', dbType: parsed.type });
 
   let rawResult;
   switch (parsed.type) {
-    case 'mongodb': rawResult = await scanMongoDBStream(parsed.connStr, onEvent); break;
-    case 'postgres': rawResult = await scanPostgres(parsed.connStr, onEvent); break;
-    case 'mysql':    rawResult = await scanMySQL(parsed.config, onEvent); break;
-    case 'sqlite':   rawResult = await scanSQLite(parsed.path, onEvent); break;
+    case 'mongodb': rawResult = await scanMongoDBStream(parsed.connStr, onEvent, spocName); break;
+    case 'postgres': rawResult = await scanPostgres(parsed.connStr, onEvent, spocName); break;
+    case 'mysql':    rawResult = await scanMySQL(parsed.config, onEvent, spocName); break;
+    case 'sqlite':   rawResult = await scanSQLite(parsed.path, onEvent, spocName); break;
     default: throw new Error('Unsupported database type');
   }
+  rawResult.spocName = spocName || null;
 
   // Count what we're about to build so the UI can show meaningful steps
   let totalTables = 0, totalPiiCols = 0;
@@ -283,11 +437,13 @@ async function scanDatabaseStream(connectionString, onEvent) {
   await new Promise(r => setImmediate(r));
 
   const graph = buildGraphData(rawResult, parsed.type);
+  const serverInfo = parseServerInfo(parsed);
+  const neo4jGraph = buildNeo4jGraph(rawResult, parsed.type, serverInfo, spocName);
 
   onEvent({ type: 'building_graph', step: 4, steps: 4, message: `Finalising graph (${graph.nodes.length} nodes, ${graph.edges.length} edges)…` });
   await new Promise(r => setImmediate(r));
 
-  return graph;
+  return { ...graph, neo4jGraph };
 }
 
 module.exports = { scanDatabaseStream };

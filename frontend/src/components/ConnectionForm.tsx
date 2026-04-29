@@ -3,6 +3,8 @@ import React, { useState } from 'react';
 interface Props {
   onScan: (connStr: string) => void;
   loading: boolean;
+  spocName: string;
+  onChangeSpoc: () => void;
 }
 
 const EXAMPLES = [
@@ -30,7 +32,7 @@ function detectDb(val: string) {
   return null;
 }
 
-export default function ConnectionForm({ onScan, loading }: Props) {
+export default function ConnectionForm({ onScan, loading, spocName, onChangeSpoc }: Props) {
   const [value, setValue] = useState('');
   const [showExamples, setShowExamples] = useState(false);
 
@@ -48,6 +50,13 @@ export default function ConnectionForm({ onScan, loading }: Props) {
           Connect to your database and discover PII data governed by India's{' '}
           <span style={{ color: '#58a6ff' }}>Digital Personal Data Protection Act</span>
         </p>
+        {/* SPOC context badge */}
+        <div style={styles.spocBadge}>
+          <span style={styles.spocIcon}>{spocName ? '👤' : '🌐'}</span>
+          <span style={styles.spocLabel}>{spocName ? 'Scanning for:' : 'Scanning:'}</span>
+          <span style={styles.spocName}>{spocName || 'All data'}</span>
+          <button style={styles.spocChange} onClick={onChangeSpoc}>Change</button>
+        </div>
       </div>
 
       {/* Card */}
@@ -173,5 +182,17 @@ const styles: Record<string, React.CSSProperties> = {
   chip: {
     background: '#21262d', border: '1px solid #30363d', borderRadius: 20,
     padding: '4px 12px', fontSize: 12, color: '#8b949e',
+  },
+  spocBadge: {
+    display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 12,
+    background: '#1c2128', border: '1px solid #30363d', borderRadius: 20,
+    padding: '5px 14px', fontSize: 13,
+  },
+  spocIcon: { fontSize: 14 },
+  spocLabel: { color: '#8b949e' },
+  spocName: { color: '#58a6ff', fontWeight: 700 },
+  spocChange: {
+    background: 'none', border: 'none', color: '#484f58', cursor: 'pointer',
+    fontSize: 12, padding: '0 0 0 4px', textDecoration: 'underline',
   },
 };

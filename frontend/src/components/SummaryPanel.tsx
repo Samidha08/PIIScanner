@@ -5,9 +5,10 @@ interface Props {
   summary: ScanSummary;
   dbName: string;
   dbType: string;
+  spocName?: string;
 }
 
-export default function SummaryPanel({ summary, dbName, dbType }: Props) {
+export default function SummaryPanel({ summary, dbName, dbType, spocName }: Props) {
   const piiPct = summary.totalColumns > 0
     ? Math.round((summary.piiColumns / summary.totalColumns) * 100)
     : 0;
@@ -18,6 +19,12 @@ export default function SummaryPanel({ summary, dbName, dbType }: Props) {
 
   return (
     <div style={styles.panel}>
+      {spocName && (
+        <div style={styles.spocRow}>
+          <span style={styles.spocIcon}>👤</span>
+          <span style={styles.spocName}>{spocName}</span>
+        </div>
+      )}
       <div style={styles.header}>
         <span style={styles.dbName}>🗄️ {dbName}</span>
         <span style={{ ...styles.riskBadge, background: riskLevel.color + '22', color: riskLevel.color, borderColor: riskLevel.color + '44' }}>
@@ -87,4 +94,11 @@ const styles: Record<string, React.CSSProperties> = {
   catDot: { width: 8, height: 8, borderRadius: '50%', flexShrink: 0 },
   catLabel: { flex: 1, fontSize: 12, color: '#e6edf3' },
   catCount: { fontSize: 12, fontWeight: 600, color: '#8b949e', background: '#21262d', padding: '1px 7px', borderRadius: 10 },
+  spocRow: {
+    display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10,
+    background: '#161b22', border: '1px solid #30363d', borderRadius: 8,
+    padding: '6px 10px',
+  },
+  spocIcon: { fontSize: 14 },
+  spocName: { fontSize: 14, fontWeight: 700, color: '#58a6ff' },
 };

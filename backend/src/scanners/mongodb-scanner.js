@@ -88,17 +88,26 @@ async function runConcurrent(tasks, limit) {
   return results;
 }
 
-async function scanCollection(db, collName) {
+async function scanCollection(db, collName, spocName = null) {
   const collection = db.collection(collName);
 
   let rowCount = 0;
   try { rowCount = await collection.estimatedDocumentCount(); } catch (_) {}
 
+  // Build query filter: if spocName given, try spoc_name field first
+  const spocFilter = spocName
+    ? { $or: [{ spoc_name: spocName }, { spocName: spocName }, { owner: spocName }] }
+    : {};
+
   let sampleDocs = [];
   try {
-    sampleDocs = await collection.aggregate([{ $sample: { size: SAMPLE_SIZE } }]).toArray();
+    const pipeline = [
+      ...(spocName ? [{ $match: spocFilter }] : []),
+      { $sample: { size: SAMPLE_SIZE } },
+    ];
+    sampleDocs = await collection.aggregate(pipeline).toArray();
   } catch (_) {
-    try { sampleDocs = await collection.find({}).limit(SAMPLE_SIZE).toArray(); } catch (_2) {}
+    try { sampleDocs = await collection.find(spocFilter).limit(SAMPLE_SIZE).toArray(); } catch (_2) {}
   }
 
   const fieldMap = extractFields(sampleDocs);
@@ -128,7 +137,7 @@ async function scanCollection(db, collName) {
  * Streaming MongoDB scan — calls onEvent as each collection finishes.
  * Returns the final raw result in the same shape as the SQL scanners.
  */
-async function scanMongoDBStream(connectionString, onEvent) {
+async function scanMongoDBStream(connectionString, onEvent, spocName = null) {
   const parsedDb = parseMongoDbName(connectionString);
 
   const client = new MongoClient(connectionString, {
@@ -196,7 +205,7 @@ async function scanMongoDBStream(connectionString, onEvent) {
         allTasks.push(async () => {
           try {
             const tableResult = await withTimeout(
-              scanCollection(db, collName),
+              scanCollection(db, collName, spocName),
               COLLECTION_TIMEOUT_MS
             );
             result.schemas[dbName].tables[collName] = tableResult;

@@ -3,6 +3,75 @@ import cytoscape, { Core, NodeSingular } from 'cytoscape';
 import { GraphNode, GraphEdge, ScanResult } from '../types';
 import NodeDetailPanel from './NodeDetailPanel';
 import SummaryPanel from './SummaryPanel';
+import Neo4jPushModal from './Neo4jPushModal';
+
+function buildYaml(data: ScanResult): string {
+  const safeName = data.dbName.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+  const lines: string[] = [];
+
+  lines.push('dataset:');
+  lines.push(`  name: ${safeName}_pii_dataset`);
+  lines.push(`  description: PII dataset scanned from ${data.dbName}${data.spocName ? ` for ${data.spocName}` : ''}`);
+  lines.push('  data_categories:');
+  lines.push('    - user');
+  lines.push('  retention:');
+  lines.push('    policy: no_retention_policy_defined');
+  lines.push('  collections:');
+
+  const nodeById = new Map(data.nodes.map(n => [n.id, n]));
+
+  // table → [columnId]
+  const tableToColumns = new Map<string, string[]>();
+  // columnId → [pii label]
+  const columnToPii = new Map<string, string[]>();
+
+  for (const edge of data.edges) {
+    if (edge.type === 'HAS_COLUMN') {
+      if (!tableToColumns.has(edge.source)) tableToColumns.set(edge.source, []);
+      tableToColumns.get(edge.source)!.push(edge.target);
+    }
+    if (edge.type === 'CONTAINS_PII') {
+      if (!columnToPii.has(edge.source)) columnToPii.set(edge.source, []);
+      const piiNode = nodeById.get(edge.target);
+      if (piiNode) columnToPii.get(edge.source)!.push(piiNode.label);
+    }
+  }
+
+  const tableNodes = data.nodes.filter(n => n.type === 'table');
+
+  for (const table of tableNodes) {
+    const columnIds = tableToColumns.get(table.id) ?? [];
+    const columns = columnIds.map(id => nodeById.get(id)).filter(Boolean) as GraphNode[];
+
+    // Detect primary key: first column named 'id' or '<tableSingular>_id'
+    const tableBase = table.label.replace(/s$/, '');
+    const pkCol = columns.find(c =>
+      c.label === 'id' || c.label === `${tableBase}_id` || c.label === `${table.label}_id`
+    ) ?? columns.find(c => c.label.endsWith('_id'));
+
+    lines.push(`    - name: ${table.label}`);
+    lines.push(`      description: ${table.label} table`);
+    if (pkCol) lines.push(`      primary_key: ${pkCol.label}`);
+    lines.push('      fields:');
+
+    for (const col of columns) {
+      const piiLabels = columnToPii.get(col.id) ?? [];
+      const isPk = pkCol?.id === col.id;
+      lines.push(`        - name: ${col.label}`);
+      if (isPk) {
+        lines.push(`          data_categories: [user.unique_id]`);
+        lines.push('          is_primary_key: true');
+      } else if (piiLabels.length > 0) {
+        lines.push(`          data_categories: [${piiLabels.join(', ')}]`);
+      } else {
+        lines.push('          data_categories: [system.operations]');
+      }
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
 
 interface Props {
   data: ScanResult;
@@ -37,6 +106,18 @@ export default function GraphVisualization({ data, onReset }: Props) {
   const [layout, setLayout] = useState<'cose' | 'breadthfirst' | 'concentric'>(() => autoLayout(data.nodes.length) as 'cose' | 'breadthfirst');
   const [renderPhase, setRenderPhase] = useState<'waiting' | 'layout' | 'ready'>('waiting');
   const [renderMsg, setRenderMsg] = useState('Preparing graph renderer…');
+  const [showNeo4jModal, setShowNeo4jModal] = useState(false);
+
+  const handleDownloadYaml = () => {
+    const yaml = buildYaml(data);
+    const blob = new Blob([yaml], { type: 'text/yaml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${data.dbName}_pii_dataset.yaml`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const buildElements = useCallback((nodes: GraphNode[], edges: GraphEdge[], f: FilterType) => {
     let visibleNodes = nodes;
@@ -235,6 +316,7 @@ export default function GraphVisualization({ data, onReset }: Props) {
   }, [data, filter, layout, buildElements, initCy]);
 
   const fitGraph = () => cyRef.current?.fit(undefined, 40);
+
   const zoomIn = () => cyRef.current?.zoom({ level: (cyRef.current.zoom() || 1) * 1.3, renderedPosition: { x: (containerRef.current?.clientWidth || 800) / 2, y: (containerRef.current?.clientHeight || 600) / 2 } });
   const zoomOut = () => cyRef.current?.zoom({ level: (cyRef.current.zoom() || 1) / 1.3, renderedPosition: { x: (containerRef.current?.clientWidth || 800) / 2, y: (containerRef.current?.clientHeight || 600) / 2 } });
 
@@ -244,6 +326,13 @@ export default function GraphVisualization({ data, onReset }: Props) {
       <div style={styles.toolbar}>
         <div style={styles.toolbarLeft}>
           <button style={styles.backBtn} onClick={onReset}>← New Scan</button>
+          {data.spocName && (
+            <div style={styles.spocBadge}>
+              <span>👤</span>
+              <span style={{ color: '#8b949e', fontSize: 12 }}>SPOC:</span>
+              <span style={{ color: '#58a6ff', fontWeight: 700, fontSize: 13 }}>{data.spocName}</span>
+            </div>
+          )}
           <div style={styles.filterGroup}>
             {(['all', 'pii_only', 'pii_category'] as FilterType[]).map(f => (
               <button key={f} style={{ ...styles.filterBtn, ...(filter === f ? styles.filterBtnActive : {}) }} onClick={() => setFilter(f)}>
@@ -260,6 +349,18 @@ export default function GraphVisualization({ data, onReset }: Props) {
           </div>
         </div>
         <div style={styles.zoomBtns}>
+          <button style={styles.yamlBtn} onClick={handleDownloadYaml}>
+            ⬇ Download YAML
+          </button>
+          {data.neo4jGraph && (
+            <button style={styles.neo4jBtn} onClick={() => setShowNeo4jModal(true)}>
+              <svg width="14" height="14" viewBox="0 0 22 22" style={{ marginRight: 6, verticalAlign: 'middle' }}>
+                <circle cx="11" cy="11" r="10" fill="rgba(255,255,255,0.25)" />
+                <text x="11" y="15.5" textAnchor="middle" fontSize="11" fontWeight="bold" fill="white">N</text>
+              </svg>
+              Push to Neo4j
+            </button>
+          )}
           <button style={styles.zoomBtn} onClick={zoomIn}>+</button>
           <button style={styles.zoomBtn} onClick={fitGraph}>⊙</button>
           <button style={styles.zoomBtn} onClick={zoomOut}>−</button>
@@ -270,7 +371,7 @@ export default function GraphVisualization({ data, onReset }: Props) {
       <div style={styles.main}>
         {/* Left: summary */}
         <div style={styles.sidebar}>
-          <SummaryPanel summary={data.summary} dbName={data.dbName} dbType={data.dbType} />
+          <SummaryPanel summary={data.summary} dbName={data.dbName} dbType={data.dbType} spocName={data.spocName} />
           <Legend />
         </div>
 
@@ -311,6 +412,14 @@ export default function GraphVisualization({ data, onReset }: Props) {
           </div>
         )}
       </div>
+
+      {showNeo4jModal && data.neo4jGraph && (
+        <Neo4jPushModal
+          neo4jGraph={data.neo4jGraph}
+          dbName={data.dbName}
+          onClose={() => setShowNeo4jModal(false)}
+        />
+      )}
     </div>
   );
 }
@@ -353,13 +462,29 @@ const styles: Record<string, React.CSSProperties> = {
     background: '#21262d', border: '1px solid #30363d', borderRadius: 6,
     color: '#e6edf3', cursor: 'pointer', fontSize: 13, padding: '6px 12px',
   },
+  spocBadge: {
+    display: 'flex', alignItems: 'center', gap: 5,
+    background: '#1c2128', border: '1px solid #30363d', borderRadius: 20,
+    padding: '4px 12px',
+  },
   filterGroup: { display: 'flex', gap: 4, background: '#0d1117', padding: 3, borderRadius: 8 },
   filterBtn: {
     background: 'none', border: 'none', borderRadius: 6, color: '#8b949e',
     cursor: 'pointer', fontSize: 12, fontWeight: 500, padding: '5px 10px', transition: 'all 0.15s',
   },
   filterBtnActive: { background: '#21262d', color: '#e6edf3' },
-  zoomBtns: { display: 'flex', gap: 4 },
+  zoomBtns: { display: 'flex', gap: 6, alignItems: 'center' },
+  yamlBtn: {
+    background: '#1f6feb', border: 'none', borderRadius: 6, color: '#fff',
+    cursor: 'pointer', fontSize: 12, fontWeight: 600,
+    padding: '6px 12px', whiteSpace: 'nowrap' as const,
+  },
+  neo4jBtn: {
+    background: 'linear-gradient(135deg, #008cc1, #00acd4)',
+    border: 'none', borderRadius: 6, color: '#fff',
+    cursor: 'pointer', fontSize: 12, fontWeight: 600,
+    padding: '6px 12px', whiteSpace: 'nowrap' as const,
+  },
   zoomBtn: {
     background: '#21262d', border: '1px solid #30363d', borderRadius: 6,
     color: '#e6edf3', cursor: 'pointer', fontSize: 14, width: 32, height: 32,
