@@ -2,9 +2,10 @@ import React, { useState, useRef, useCallback } from 'react';
 import ConnectionForm from './components/ConnectionForm';
 import GraphVisualization from './components/GraphVisualization';
 import ScanProgress, { ProgressState } from './components/ScanProgress';
+import SpocEntry from './components/SpocEntry';
 import { ScanResult } from './types';
 
-type AppState = 'idle' | 'streaming' | 'rendering' | 'done' | 'error';
+type AppState = 'spoc_entry' | 'idle' | 'streaming' | 'rendering' | 'done' | 'error';
 
 const RECENT_MAX = 50;
 const BATCH_INTERVAL_MS = 150; // flush progress updates at most every 150ms
@@ -31,11 +32,12 @@ type PendingProgress = {
 };
 
 export default function App() {
-  const [appState, setAppState] = useState<AppState>('idle');
+  const [appState, setAppState] = useState<AppState>('spoc_entry');
   const [result, setResult] = useState<ScanResult | null>(null);
   const [error, setError] = useState('');
   const [progress, setProgress] = useState<ProgressState>(initProgress());
   const [connStr, setConnStr] = useState('');
+  const [spocName, setSpocName] = useState('');
 
   const esRef = useRef<EventSource | null>(null);
   const scanCompletedRef = useRef(false);
@@ -85,10 +87,10 @@ export default function App() {
 
     let jobId: string;
     try {
-      const res = await fetch('/api/scan/start', {
+      const res = await fetch(`${import.meta.env.VITE_API_URL ?? ''}/api/scan/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ connectionString }),
+        body: JSON.stringify({ connectionString, spocName }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to start scan');
@@ -99,7 +101,7 @@ export default function App() {
       return;
     }
 
-    const es = new EventSource(`/api/scan/stream/${jobId}`);
+    const es = new EventSource(`${import.meta.env.VITE_API_URL ?? ''}/api/scan/stream/${jobId}`);
     esRef.current = es;
 
     es.addEventListener('status', (e) => {
@@ -183,6 +185,11 @@ export default function App() {
     setProgress(initProgress());
   };
 
+  const handleSpocSubmit = (name: string) => {
+    setSpocName(name);
+    setAppState('idle');
+  };
+
   const handleReset = () => {
     if (batchTimerRef.current) { clearTimeout(batchTimerRef.current); batchTimerRef.current = null; }
     esRef.current?.close();
@@ -198,13 +205,21 @@ export default function App() {
     return <GraphVisualization data={result} onReset={handleReset} />;
   }
 
+  if (appState === 'spoc_entry') {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#0d1117' }}>
+        <SpocEntry onSubmit={handleSpocSubmit} />
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#0d1117' }}>
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
       {appState === 'streaming'
         ? <ScanProgress progress={progress} connectionString={connStr} onCancel={handleCancel} />
-        : <ConnectionForm onScan={handleScan} loading={false} />
+        : <ConnectionForm onScan={handleScan} loading={false} spocName={spocName} onChangeSpoc={() => setAppState('spoc_entry')} />
       }
 
       {appState === 'error' && (
