@@ -70,15 +70,34 @@ export default function Neo4jPushModal({ neo4jGraph, dbName, onClose }: Props) {
     setPushState('done');
   };
 
+  const handlePush = async () => {
+    setPushState('pushing');
+    setErrorMsg('');
+    setResult(null);
+    try {
+      const res = await fetch(`${import.meta.env.VITE_API_URL ?? ''}/api/neo4j/push`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ neo4jGraph, clearFirst: false }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Push failed');
+      setResult({ nodeCount: data.nodeCount, relCount: data.relCount });
+      setPushState('done');
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Push failed');
+      setPushState('error');
+    }
+  };
+
   const handleCopy = async () => {
     await navigator.clipboard.writeText(script);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // keep these so TypeScript doesn't complain about unused imports
-  const [result] = useState<{ nodeCount: number; relCount: number } | null>(null);
-  const [errorMsg] = useState('');
+  const [result, setResult] = useState<{ nodeCount: number; relCount: number } | null>(null);
+  const [errorMsg, setErrorMsg] = useState('');
 
   return (
     <div style={styles.overlay} onClick={e => e.target === e.currentTarget && onClose()}>
@@ -138,6 +157,23 @@ export default function Neo4jPushModal({ neo4jGraph, dbName, onClose }: Props) {
           </div>
           <pre style={styles.scriptPreview}>{script.split('\n').slice(0, 8).join('\n')}{'\n'}…</pre>
         </div>
+
+        {/* Push directly */}
+        <div style={styles.pushRow}>
+          <button
+            style={{ ...styles.pushBtn, opacity: pushState === 'pushing' ? 0.7 : 1 }}
+            onClick={handlePush}
+            disabled={pushState === 'pushing'}
+          >
+            {pushState === 'pushing' ? '⏳ Pushing…' : pushState === 'done' && result ? `✓ Pushed ${result.nodeCount} nodes, ${result.relCount} rels` : '🚀 Push to Neo4j AuraDB'}
+          </button>
+          {pushState === 'error' && (
+            <div style={styles.errorMsg}>⚠ {errorMsg || 'Push failed'}</div>
+          )}
+        </div>
+
+        {/* Divider */}
+        <div style={styles.divider}><span style={styles.dividerText}>or download script manually</span></div>
 
         {/* Action buttons */}
         <div style={styles.actionRow}>
@@ -218,6 +254,15 @@ const styles: Record<string, React.CSSProperties> = {
   scriptHeader: { display: 'flex', justifyContent: 'space-between', padding: '8px 12px', borderBottom: '1px solid #21262d' },
   scriptPreview: { margin: 0, padding: '10px 12px', fontSize: 11, color: '#8b949e', fontFamily: 'JetBrains Mono, monospace', overflowX: 'auto', maxHeight: 120 },
 
+  pushRow: { marginBottom: 14 },
+  pushBtn: {
+    width: '100%', background: 'linear-gradient(135deg, #238636, #2ea043)',
+    border: 'none', borderRadius: 8, color: '#fff', fontSize: 14,
+    fontWeight: 700, padding: '13px', cursor: 'pointer',
+  },
+  errorMsg: { marginTop: 8, fontSize: 12, color: '#f85149', background: '#1c0a0a', border: '1px solid #f8514933', borderRadius: 6, padding: '6px 10px' },
+  divider: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 },
+  dividerText: { fontSize: 11, color: '#484f58', background: '#1c2128', padding: '0 8px', whiteSpace: 'nowrap' as const },
   actionRow: { display: 'flex', gap: 10, marginBottom: 12 },
   downloadBtn: {
     flex: 1, background: 'linear-gradient(135deg, #008CC1, #00acd4)',

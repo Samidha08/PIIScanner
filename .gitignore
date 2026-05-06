@@ -5,4 +5,4 @@ frontend/node_modules/
 .env
 dist/
 build/
-.claude/
+.claude/backend/.env

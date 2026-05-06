@@ -2,6 +2,7 @@
 if (typeof globalThis.crypto === 'undefined') {
   globalThis.crypto = require('crypto').webcrypto;
 }
+require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
@@ -88,9 +89,15 @@ app.get('/api/scan/stream/:jobId', (req, res) => {
 
 // ── Neo4j push ────────────────────────────────────────────────────────────────
 app.post('/api/neo4j/push', async (req, res) => {
-  const { boltUrl, username, password, neo4jGraph, clearFirst } = req.body;
+  const { neo4jGraph, clearFirst } = req.body;
+
+  // Use env vars if available, otherwise fall back to request body
+  const boltUrl  = process.env.NEO4J_URI      || req.body.boltUrl;
+  const username = process.env.NEO4J_USERNAME  || req.body.username;
+  const password = process.env.NEO4J_PASSWORD  || req.body.password;
+
   if (!boltUrl || !neo4jGraph) {
-    return res.status(400).json({ error: 'boltUrl and neo4jGraph are required' });
+    return res.status(400).json({ error: 'Neo4j URI not configured and not provided in request' });
   }
   try {
     const result = await pushToNeo4j({ boltUrl, username, password, neo4jGraph, clearFirst });
