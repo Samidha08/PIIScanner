@@ -9,6 +9,17 @@ interface Props {
 
 type PushState = 'idle' | 'pushing' | 'done' | 'error';
 
+// Convert a JS object to a Cypher map literal: {key: 'val', num: 1, n: null}
+function toCypherMap(obj: Record<string, unknown>): string {
+  const entries = Object.entries(obj).map(([k, v]) => {
+    if (v === null || v === undefined) return `${k}: null`;
+    if (typeof v === 'boolean') return `${k}: ${v}`;
+    if (typeof v === 'number') return `${k}: ${v}`;
+    return `${k}: '${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+  });
+  return `{${entries.join(', ')}}`;
+}
+
 function buildCypherScript(neo4jGraph: Neo4jGraph): string {
   const lines: string[] = [
     '// DPDPA PII Scanner — Neo4j import script',
@@ -27,8 +38,8 @@ function buildCypherScript(neo4jGraph: Neo4jGraph): string {
     byLabel[node.label].push({ id: node.id, ...node.properties });
   }
   for (const [label, batch] of Object.entries(byLabel)) {
-    const propsJson = JSON.stringify(batch);
-    lines.push(`UNWIND ${propsJson} AS props`);
+    const cypherList = '[' + batch.map(toCypherMap).join(', ') + ']';
+    lines.push(`UNWIND ${cypherList} AS props`);
     lines.push(`MERGE (n:\`${label}\` {id: props.id}) SET n += props;`);
     lines.push('');
   }
@@ -40,15 +51,15 @@ function buildCypherScript(neo4jGraph: Neo4jGraph): string {
     byType[rel.type].push({ from: rel.from, to: rel.to });
   }
   for (const [type, batch] of Object.entries(byType)) {
-    const propsJson = JSON.stringify(batch);
-    lines.push(`UNWIND ${propsJson} AS r`);
+    const cypherList = '[' + batch.map(toCypherMap).join(', ') + ']';
+    lines.push(`UNWIND ${cypherList} AS r`);
     lines.push(`MATCH (a {id: r.from}), (b {id: r.to})`);
     lines.push(`MERGE (a)-[:\`${type}\`]->(b);`);
     lines.push('');
   }
 
   lines.push('// ── View result ───────────────────────────────────────────');
-  lines.push('// MATCH (n) RETURN n LIMIT 100;');
+  lines.push('MATCH (n) RETURN n LIMIT 100;');
 
   return lines.join('\n');
 }
